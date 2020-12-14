@@ -99,10 +99,11 @@ def knnGPU(x, y, k, mem=5 * 1024 * 1024 * 1024):
     config.device = 3
     idx = faiss.GpuIndexFlatIP(faiss.StandardGpuResources(), dim, config)
     idx = faiss.IndexIVFPQ(idx, dim, 100, 8, 8)
-    res = faiss.GpuResourcesProvider()
-    dir(res)
-    exit()
-    idx = faiss.GpuIndexIVFPQ(res, idx, config)
+    idx = faiss.index_cpu_to_all_gpus(idx)
+    # res = faiss.GpuResourcesProvider()
+    # dir(res)
+    # exit()
+    # idx = faiss.GpuIndexIVFPQ(res, idx, config)
     # idx = faiss.IndexIVFFlat(idx, dim, 100)
     # idx.nprobe = 3
     idx.train(y)
