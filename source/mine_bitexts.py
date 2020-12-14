@@ -21,13 +21,18 @@ import faiss
 import argparse
 import tempfile
 import numpy as np
+import time
+from multiprocessing import Pool
+import itertools
+import tqdm
+import functools
 
 # get environment
-assert os.environ.get('LASER'), 'Please set the enviornment variable LASER'
-LASER = os.environ['LASER']
+assert os.environ.get("LASER"), "Please set the enviornment variable LASER"
+LASER = os.environ["LASER"]
 
-sys.path.append(LASER + '/source')
-sys.path.append(LASER + '/source/tools')
+sys.path.append(LASER + "/source")
+sys.path.append(LASER + "/source/tools")
 from embed import SentenceEncoder, EncodeLoad, EncodeFile, EmbedLoad
 from text_processing import Token, BPEfastApply
 
@@ -38,10 +43,11 @@ from text_processing import Token, BPEfastApply
 #
 ###############################################################################
 
+
 def TextLoadUnify(fname, args):
     if args.verbose:
-        print(' - loading texts {:s}: '.format(fname), end='')
-    fin = open(fname, encoding=args.encoding, errors='surrogateescape')
+        print(" - loading texts {:s}: ".format(fname), end="")
+    fin = open(fname, encoding=args.encoding, errors="surrogateescape")
     inds = []
     sents = []
     sent2ind = {}
@@ -59,7 +65,7 @@ def TextLoadUnify(fname, args):
             nu += 1
         n += 1
     if args.verbose:
-        print('{:d} lines, {:d} unique'.format(n, nu))
+        print("{:d} lines, {:d} unique".format(n, nu))
     del sent2ind
     return inds, sents
 
@@ -69,6 +75,7 @@ def TextLoadUnify(fname, args):
 # Wrapper for knn on CPU/GPU
 #
 ###############################################################################
+
 
 def knn(x, y, k, use_gpu):
     return knnGPU(x, y, k) if use_gpu else knnCPU(x, y, k)
@@ -80,31 +87,46 @@ def knn(x, y, k, use_gpu):
 #
 ###############################################################################
 
-def knnGPU(x, y, k, mem=5*1024*1024*1024):
+
+def knnGPU(x, y, k, mem=5 * 1024 * 1024 * 1024):
     dim = x.shape[1]
-    batch_size = mem // (dim*4)
+    batch_size = mem // (dim * 10)
+
     sim = np.zeros((x.shape[0], k), dtype=np.float32)
     ind = np.zeros((x.shape[0], k), dtype=np.int64)
-    for xfrom in range(0, x.shape[0], batch_size):
-        xto = min(xfrom + batch_size, x.shape[0])
-        bsims, binds = [], []
-        for yfrom in range(0, y.shape[0], batch_size):
-            yto = min(yfrom + batch_size, y.shape[0])
-            # print('{}-{}  ->  {}-{}'.format(xfrom, xto, yfrom, yto))
-            idx = faiss.IndexFlatIP(dim)
-            idx = faiss.index_cpu_to_all_gpus(idx)
-            idx.add(y[yfrom:yto])
-            bsim, bind = idx.search(x[xfrom:xto], min(k, yto-yfrom))
-            bsims.append(bsim)
-            binds.append(bind + yfrom)
-            del idx
-        bsims = np.concatenate(bsims, axis=1)
-        binds = np.concatenate(binds, axis=1)
-        aux = np.argsort(-bsims, axis=1)
-        for i in range(xfrom, xto):
-            for j in range(k):
-                sim[i, j] = bsims[i-xfrom, aux[i-xfrom, j]]
-                ind[i, j] = binds[i-xfrom, aux[i-xfrom, j]]
+    start = time.time()
+    config = faiss.GpuIndexFlatConfig()
+    config.device = 3
+    idx = faiss.GpuIndexFlatIP(faiss.StandardGpuResources(), dim, config)
+    idx = faiss.IndexIVFPQ(idx, dim, 100, 8, 8)
+    res = faiss.GpuResourcesProvider()
+    dir(res)
+    exit()
+    idx = faiss.GpuIndexIVFPQ(res, idx, config)
+    # idx = faiss.IndexIVFFlat(idx, dim, 100)
+    # idx.nprobe = 3
+    idx.train(y)
+    idx.add(y)
+    sim, index = idx.search(x, k)
+    # for xfrom in range(0, x.shape[0], batch_size):
+    #    xto = min(xfrom + batch_size, x.shape[0] - 1)
+    # bsims, binds = [], []
+    # print('{}-{}  ->  {}-{}'.format(xfrom, xto, yfrom, yto))
+    #    bsims, binds = idx.search(x[xfrom:xto], k)
+    # bsims.append(bsim)
+    # binds.append(bind)
+
+    # bsims = np.concatenate(bsims, axis=1)
+    # binds = np.concatenate(binds, axis=1)
+    #    aux = np.argsort(-bsims, axis=1)
+    #    for i in range(xfrom, xto):
+    #        for j in range(k):
+    #            sim[i, j] = bsims[i - xfrom, aux[i - xfrom, j]]
+    #            ind[i, j] = binds[i - xfrom, aux[i - xfrom, j]]
+    idx.reset()
+    del idx
+    print(sim.shape, "sim")
+    print(ind.shape, "ind")
     return sim, ind
 
 
@@ -113,6 +135,7 @@ def knnGPU(x, y, k, mem=5*1024*1024*1024):
 # Perform knn on CPU
 #
 ###############################################################################
+
 
 def knnCPU(x, y, k):
     dim = x.shape[1]
@@ -128,18 +151,36 @@ def knnCPU(x, y, k):
 #
 ###############################################################################
 
+
 def score(x, y, fwd_mean, bwd_mean, margin):
     return margin(x.dot(y), (fwd_mean + bwd_mean) / 2)
 
 
+def score_list(tokenlist, x, y, candidate_inds, fwd_mean, bwd_mean, margin):
+    value = score(
+        x[tokenlist[0]].y[tokenlist[1]],
+        fwd_mean[0],
+        bwd_mean[candidate_inds[tokenlist[0], tokenlist[1]]],
+        margin,
+    )
+    return str(tokenlist[0]) + ";" + str(tokenlist[1]) + "," + str(value)
+
+
 def score_candidates(x, y, candidate_inds, fwd_mean, bwd_mean, margin, verbose=False):
+
     if verbose:
-        print(' - scoring {:d} candidates'.format(x.shape[0]))
+        print(" - scoring {:d} candidates".format(x.shape[0]))
     scores = np.zeros(candidate_inds.shape)
-    for i in range(scores.shape[0]):
-        for j in range(scores.shape[1]):
-            k = candidate_inds[i, j]
-            scores[i, j] = score(x[i], y[k], fwd_mean[i], bwd_mean[k], margin)
+    tokenlist = [
+        (a, b)
+        for a, b in itertools.product(range(scores.shape[0]), range(scores.shape[1]))
+    ]
+    with Pool(processes=24) as p:
+        features = p.map(
+            functools.partial(score_list, x, y, candidate_inds, fwd_mean, bwd_mean),
+            tqdm.tqdm(tokenlist),
+        )
+    print(feaures)
     return scores
 
 
@@ -149,69 +190,87 @@ def score_candidates(x, y, candidate_inds, fwd_mean, bwd_mean, margin, verbose=F
 #
 ###############################################################################
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='LASER: Mine bitext')
-    parser.add_argument('src',
-        help='Source language corpus')
-    parser.add_argument('trg',
-        help='Target language corpus')
-    parser.add_argument('--encoding', default='utf-8',
-        help='Character encoding for input/output')
-    parser.add_argument('--src-lang', required=True,
-        help='Source language id')
-    parser.add_argument('--trg-lang', required=True,
-        help='Target language id')
-    parser.add_argument('--output', required=True,
-        help='Output file')
-    parser.add_argument('--threshold', type=float, default=0,
-        help='Threshold on extracted bitexts')
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="LASER: Mine bitext")
+    parser.add_argument("src", help="Source language corpus")
+    parser.add_argument("trg", help="Target language corpus")
+    parser.add_argument(
+        "--encoding", default="utf-8", help="Character encoding for input/output"
+    )
+    parser.add_argument("--src-lang", required=True, help="Source language id")
+    parser.add_argument("--trg-lang", required=True, help="Target language id")
+    parser.add_argument("--output", required=True, help="Output file")
+    parser.add_argument(
+        "--threshold", type=float, default=0, help="Threshold on extracted bitexts"
+    )
 
     # mining params
-    parser.add_argument('--mode',
-        choices=['search', 'score', 'mine'], required=True,
-        help='Execution mode')
-    parser.add_argument('-k', '--neighborhood',
-        type=int, default=4,
-        help='Neighborhood size')
-    parser.add_argument('--margin',
-        choices=['absolute', 'distance', 'ratio'], default='ratio',
-        help='Margin function')
-    parser.add_argument('--retrieval',
-        choices=['fwd', 'bwd', 'max', 'intersect'], default='max',
-        help='Retrieval strategy')
-    parser.add_argument('--unify', action='store_true',
-        help='Unify texts')
-    parser.add_argument('--gpu', action='store_true',
-        help='Run knn on all available GPUs')
-    parser.add_argument('--verbose', action='store_true',
-        help='Detailed output')
+    parser.add_argument(
+        "--mode",
+        choices=["search", "score", "mine"],
+        required=True,
+        help="Execution mode",
+    )
+    parser.add_argument(
+        "-k", "--neighborhood", type=int, default=4, help="Neighborhood size"
+    )
+    parser.add_argument(
+        "--margin",
+        choices=["absolute", "distance", "ratio"],
+        default="ratio",
+        help="Margin function",
+    )
+    parser.add_argument(
+        "--retrieval",
+        choices=["fwd", "bwd", "max", "intersect"],
+        default="max",
+        help="Retrieval strategy",
+    )
+    parser.add_argument("--unify", action="store_true", help="Unify texts")
+    parser.add_argument(
+        "--gpu", action="store_true", help="Run knn on all available GPUs"
+    )
+    parser.add_argument("--verbose", action="store_true", help="Detailed output")
 
     # embeddings
-    parser.add_argument('--src-embeddings', required=True,
-        help='Precomputed source sentence embeddings')
-    parser.add_argument('--trg-embeddings', required=True,
-        help='Precomputed target sentence embeddings')
-    parser.add_argument('--dim', type=int, default=1024,
-        help='Embedding dimensionality')
+    parser.add_argument(
+        "--src-embeddings", required=True, help="Precomputed source sentence embeddings"
+    )
+    parser.add_argument(
+        "--trg-embeddings", required=True, help="Precomputed target sentence embeddings"
+    )
+    parser.add_argument(
+        "--dim", type=int, default=1024, help="Embedding dimensionality"
+    )
     args = parser.parse_args()
-
-    print('LASER: tool to search, score or mine bitexts')
+    start = time.time()
+    print("LASER: tool to search, score or mine bitexts")
     if args.gpu:
-        print(' - knn will run on all available GPUs (recommended)')
-    else:
-        print(' - knn will run on CPU (slow)')
 
+        print(" - knn will run on all available GPUs (recommended)")
+        print("print this atleat")
+    else:
+        print(" - knn will run on CPU (slow)")
+    print("gonna load text")
     src_inds, src_sents = TextLoadUnify(args.src, args)
+    print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
     trg_inds, trg_sents = TextLoadUnify(args.trg, args)
+    print("loaded text")
+    end = time.time()
+    print("checkpoint1", start - end)
 
     def unique_embeddings(emb, ind, verbose=False):
         aux = {j: i for i, j in enumerate(ind)}
         if verbose:
-            print(' - unify embeddings: {:d} -> {:d}'.format(len(emb), len(aux)))
+            print(" - unify embeddings: {:d} -> {:d}".format(len(emb), len(aux)))
         return emb[[aux[i] for i in range(len(aux))]]
 
+    end = time.time()
+    print("checkpoint2", start - end)
     # load the embeddings
+    print("loading embedding")
     x = EmbedLoad(args.src_embeddings, args.dim, verbose=args.verbose)
+    print("loaded embedding")
     if args.unify:
         x = unique_embeddings(x, src_inds, args.verbose)
     faiss.normalize_L2(x)
@@ -219,73 +278,105 @@ if __name__ == '__main__':
     if args.unify:
         y = unique_embeddings(y, trg_inds, args.verbose)
     faiss.normalize_L2(y)
-
+    end = time.time()
+    print("checkpoint3", start - end)
     # calculate knn in both directions
-    if args.retrieval is not 'bwd':
+    if args.retrieval != "bwd":
         if args.verbose:
-            print(' - perform {:d}-nn source against target'.format(args.neighborhood))
+            print(" - perform {:d}-nn source against target".format(args.neighborhood))
         x2y_sim, x2y_ind = knn(x, y, min(y.shape[0], args.neighborhood), args.gpu)
         x2y_mean = x2y_sim.mean(axis=1)
 
-    if args.retrieval is not 'fwd':
+    if args.retrieval != "fwd":
         if args.verbose:
-            print(' - perform {:d}-nn target against source'.format(args.neighborhood))
+            print(" - perform {:d}-nn target against source".format(args.neighborhood))
         y2x_sim, y2x_ind = knn(y, x, min(x.shape[0], args.neighborhood), args.gpu)
         y2x_mean = y2x_sim.mean(axis=1)
+    end = time.time()
+    print("checkpoint4", start - end)
 
     # margin function
-    if args.margin == 'absolute':
+    if args.margin == "absolute":
         margin = lambda a, b: a
-    elif args.margin == 'distance':
+    elif args.margin == "distance":
         margin = lambda a, b: a - b
     else:  # args.margin == 'ratio':
         margin = lambda a, b: a / b
+    end = time.time()
+    print("checkpoint5", start - end)
 
-    fout = open(args.output, mode='w', encoding=args.encoding, errors='surrogateescape')
-
-    if args.mode == 'search':
+    fout = open(args.output, mode="w", encoding=args.encoding, errors="surrogateescape")
+    if args.mode == "search":
         if args.verbose:
-            print(' - Searching for closest sentences in target')
-            print(' - writing alignments to {:s}'.format(args.output))
-        scores = score_candidates(x, y, x2y_ind, x2y_mean, y2x_mean, margin, args.verbose)
+            print(" - Searching for closest sentences in target")
+            print(" - writing alignments to {:s}".format(args.output))
+        scores = score_candidates(
+            x, y, x2y_ind, x2y_mean, y2x_mean, margin, args.verbose
+        )
         best = x2y_ind[np.arange(x.shape[0]), scores.argmax(axis=1)]
 
         nbex = x.shape[0]
-        ref = np.linspace(0, nbex-1, nbex).astype(int)  # [0, nbex)
+        ref = np.linspace(0, nbex - 1, nbex).astype(int)  # [0, nbex)
         err = nbex - np.equal(best.reshape(nbex), ref).astype(int).sum()
-        print(' - errors: {:d}={:.2f}%'.format(err, 100*err/nbex))
+        print(" - errors: {:d}={:.2f}%".format(err, 100 * err / nbex))
         for i in src_inds:
             print(trg_sents[best[i]], file=fout)
 
-    elif args.mode == 'score':
+    elif args.mode == "score":
         for i, j in zip(src_inds, trg_inds):
             s = score(x[i], y[j], x2y_mean[i], y2x_mean[j], margin)
-            print(s, src_sents[i], trg_sents[j], sep='\t', file=fout)
+            print(s, src_sents[i], trg_sents[j], sep="\t", file=fout)
 
-    elif args.mode == 'mine':
+    elif args.mode == "mine":
         if args.verbose:
-            print(' - mining for parallel data')
-        fwd_scores = score_candidates(x, y, x2y_ind, x2y_mean, y2x_mean, margin, args.verbose)
-        bwd_scores = score_candidates(y, x, y2x_ind, y2x_mean, x2y_mean, margin, args.verbose)
+            print(" - mining for parallel data")
+
+        fwd_scores = score_candidates(
+            x, y, x2y_ind, x2y_mean, y2x_mean, margin, args.verbose
+        )
+        bwd_scores = score_candidates(
+            y, x, y2x_ind, y2x_mean, x2y_mean, margin, args.verbose
+        )
+        end = time.time()
+        print("checkpoint6", start - end)
+        exit()
         fwd_best = x2y_ind[np.arange(x.shape[0]), fwd_scores.argmax(axis=1)]
         bwd_best = y2x_ind[np.arange(y.shape[0]), bwd_scores.argmax(axis=1)]
         if args.verbose:
-            print(' - writing alignments to {:s}'.format(args.output))
+            print(" - writing alignments to {:s}".format(args.output))
             if args.threshold > 0:
-                print(' - with threshold of {:f}'.format(args.threshold))
-        if args.retrieval == 'fwd':
+                print(" - with threshold of {:f}".format(args.threshold))
+        if args.retrieval == "fwd":
             for i, j in enumerate(fwd_best):
-                print(fwd_scores[i].max(), src_sents[i], trg_sents[j], sep='\t', file=fout)
-        if args.retrieval == 'bwd':
+                print(
+                    fwd_scores[i].max(), src_sents[i], trg_sents[j], sep="\t", file=fout
+                )
+        if args.retrieval == "bwd":
             for j, i in enumerate(bwd_best):
-                print(bwd_scores[j].max(), src_sents[i], trg_sents[j], sep='\t', file=fout)
-        if args.retrieval == 'intersect':
+                print(
+                    bwd_scores[j].max(), src_sents[i], trg_sents[j], sep="\t", file=fout
+                )
+        if args.retrieval == "intersect":
             for i, j in enumerate(fwd_best):
                 if bwd_best[j] == i:
-                    print(fwd_scores[i].max(), src_sents[i], trg_sents[j], sep='\t', file=fout)
-        if args.retrieval == 'max':
-            indices = np.stack((np.concatenate((np.arange(x.shape[0]), bwd_best)),
-                                np.concatenate((fwd_best, np.arange(y.shape[0])))), axis=1)
+                    print(
+                        fwd_scores[i].max(),
+                        src_sents[i],
+                        trg_sents[j],
+                        sep="\t",
+                        file=fout,
+                    )
+        end = time.time()
+        print("checkpoint7", start - end)
+
+        if args.retrieval == "max":
+            indices = np.stack(
+                (
+                    np.concatenate((np.arange(x.shape[0]), bwd_best)),
+                    np.concatenate((fwd_best, np.arange(y.shape[0]))),
+                ),
+                axis=1,
+            )
             scores = np.concatenate((fwd_scores.max(axis=1), bwd_scores.max(axis=1)))
             seen_src, seen_trg = set(), set()
             for i in np.argsort(-scores):
@@ -294,7 +385,14 @@ if __name__ == '__main__':
                     seen_src.add(src_ind)
                     seen_trg.add(trg_ind)
                     if scores[i] > args.threshold:
-                        print(scores[i], src_sents[src_ind], trg_sents[trg_ind], sep='\t', file=fout)
+                        print(
+                            scores[i],
+                            src_sents[src_ind],
+                            trg_sents[trg_ind],
+                            sep="\t",
+                            file=fout,
+                        )
+    end = time.time()
+    print("checkpoint8", start - end)
 
     fout.close()
-

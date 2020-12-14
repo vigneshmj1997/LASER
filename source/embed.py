@@ -24,9 +24,11 @@ import time
 import argparse
 import numpy as np
 from collections import namedtuple
-
+from multiprocessing import Pool
 import torch
 import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
+from tqdm import tqdm
 
 # get environment
 assert os.environ.get('LASER'), 'Please set the enviornment variable LASER'
@@ -278,7 +280,7 @@ def EncodeTime(t):
 def EncodeFilep(encoder, inp_file, out_file, buffer_size=10000, verbose=False):
     n = 0
     t = time.time()
-    for sentences in buffered_read(inp_file, buffer_size):
+    for sentences in tqdm(buffered_read(inp_file, buffer_size)):
         encoder.encode_sentences(sentences).tofile(out_file)
         n += len(sentences)
         if verbose and n % 10000 == 0:
@@ -348,6 +350,7 @@ if __name__ == '__main__':
                         help='Use CPU instead of GPU')
     parser.add_argument('--stable', action='store_true',
                         help='Use stable merge sort instead of quick sort')
+    
     args = parser.parse_args()
 
     args.buffer_size = max(args.buffer_size, 1)
@@ -373,9 +376,10 @@ if __name__ == '__main__':
                   lower_case=True, gzip=False,
                   verbose=args.verbose, over_write=False)
             ifname = tok_fname
-
+        pool=None
         if args.bpe_codes:
             bpe_fname = os.path.join(tmpdir, 'bpe')
+            
             BPEfastApply(ifname,
                          bpe_fname,
                          args.bpe_codes,

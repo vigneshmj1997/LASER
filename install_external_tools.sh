@@ -14,7 +14,7 @@
 #
 # This bash script installs third party software 
 #
-
+export LASER="/home/test/LASER"
 if [ -z ${LASER} ] ; then 
   echo "Please set the environment variable 'LASER'"
   exit
