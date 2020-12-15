@@ -84,7 +84,7 @@ InstallMosesTools () {
     f="${moses_non_breakings}.${l}"
     if [ ! -f `basename ${f}` ] ; then
       echo " - download ${f}"
-      wget -q ${moses_git}/${f} 
+      wget -q ${moses_git}/${f}
     fi
   done
 }
@@ -92,7 +92,7 @@ InstallMosesTools () {
 
 ###################################################################
 #
-# FAST BPE 
+# FAST BPE
 #
 ###################################################################
 
