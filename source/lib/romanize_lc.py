@@ -17,7 +17,6 @@
 import os
 import sys
 import argparse
-from transliterate import translit, get_available_language_codes
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -42,6 +41,9 @@ parser.add_argument(
     help="Preserve case of input texts (default is all lower case)")
 
 args = parser.parse_args()
+
+if args.language != "none":
+    from transliterate import translit
 
 for line in args.input:
     if args.language != "none":

@@ -350,9 +350,8 @@ if __name__ == '__main__':
                         help='Use CPU instead of GPU')
     parser.add_argument('--stable', action='store_true',
                         help='Use stable merge sort instead of quick sort')
-    parser.add_argument('--num-workers', type=int, default=1,
+    parser.add_argument('--num-workers', type=int, default=2,
                         help='To mention number of cores to be used')
-                        
     args = parser.parse_args()
 
     args.buffer_size = max(args.buffer_size, 1)
@@ -393,7 +392,7 @@ if __name__ == '__main__':
                          args.bpe_codes,
                          verbose=args.verbose, over_write=False)
             )
-            pool.close()            
+            pool.close()
             ifname = bpe_fname
 
         EncodeFile(encoder,

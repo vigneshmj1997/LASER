@@ -1,0 +1,4 @@
+numpy
+faiss
+torch==1.0
+transliterate
